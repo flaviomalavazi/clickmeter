@@ -1,0 +1,29 @@
+-- Replace this file with your actual schema DDL.
+-- The example below matches the query templates in queries/queries.csv so you can smoke-test
+-- the harness end-to-end before plugging in your real tables.
+
+CREATE DATABASE IF NOT EXISTS bench;
+
+CREATE TABLE IF NOT EXISTS bench.events
+(
+    event_date  Date,
+    ts          DateTime64(3),
+    user_id     UInt64,
+    event_type  LowCardinality(String),
+    duration_ms UInt32,
+    payload     String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, user_id, ts);
+
+-- Seed ~10M rows for smoke testing.  Adjust scale to taste.
+INSERT INTO bench.events
+SELECT
+    toDate('2026-06-01') + toIntervalDay(number % 7)                AS event_date,
+    toDateTime64('2026-06-01 00:00:00', 3) + toIntervalSecond(number % 604800) AS ts,
+    (number % 10000) + 1                                            AS user_id,
+    ['click','view','purchase','signup'][1 + (number % 4)]          AS event_type,
+    (number % 5000)                                                  AS duration_ms,
+    concat('payload-', toString(number))                            AS payload
+FROM numbers(10000000);

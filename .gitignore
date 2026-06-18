@@ -1,0 +1,19 @@
+# Secrets — credentials live here, never commit them
+.env
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Benchmark Specific Inputs
+queries/queries.csv
+
+# Benchmark output
+results/
+
+# macOS
+.DS_Store
+
+# Temp files
+temp/

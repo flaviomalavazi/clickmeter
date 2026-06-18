@@ -1,0 +1,16 @@
+query_template,p1,p2,p3,p4,p5
+"SELECT 1",,,,,
+"SELECT count() FROM events",,,,,
+"SELECT count() FROM events WHERE event_date = '${p1}'",2026-06-01,,,,
+"SELECT count() FROM events WHERE event_date = '${p1}' AND event_type = '${p2}'",2026-06-01,click,,,
+"SELECT user_id, count() FROM events WHERE event_date = '${p1}' AND event_type = '${p2}' GROUP BY user_id ORDER BY count() DESC LIMIT ${p3}",2026-06-01,click,100,,
+"SELECT event_type, count(), avg(duration_ms) FROM events WHERE event_date BETWEEN '${p1}' AND '${p2}' GROUP BY event_type",2026-06-01,2026-06-07,,,
+"SELECT avg(duration_ms) FROM events WHERE event_date BETWEEN '${p1}' AND '${p2}' AND user_id = ${p3}",2026-06-01,2026-06-07,42,,
+"SELECT * FROM events WHERE event_date = '${p1}' AND user_id = ${p2} ORDER BY ts DESC LIMIT ${p3}",2026-06-03,1001,50,,
+"SELECT toStartOfHour(ts) AS bucket, count() FROM events WHERE event_date = '${p1}' GROUP BY bucket ORDER BY bucket",2026-06-04,,,,
+"SELECT user_id, count() FROM events WHERE event_date BETWEEN '${p1}' AND '${p2}' AND event_type IN ('${p3}','${p4}') GROUP BY user_id HAVING count() > ${p5} ORDER BY count() DESC LIMIT 20",2026-06-01,2026-06-07,click,purchase,5
+"SELECT uniqExact(user_id) FROM events WHERE event_date = '${p1}' AND event_type = '${p2}'",2026-06-05,signup,,,
+"SELECT quantiles(0.5, 0.9, 0.95, 0.99)(duration_ms) FROM events WHERE event_date = '${p1}'",2026-06-02,,,,
+"SELECT user_id, groupArray(event_type) FROM events WHERE event_date = '${p1}' AND user_id BETWEEN ${p2} AND ${p3} GROUP BY user_id",2026-06-06,100,200,,
+"SELECT count() FROM events WHERE event_date = '${p1}' AND payload LIKE '%${p2}%'",2026-06-07,payload-9999,,,
+"SELECT event_type, countIf(duration_ms > ${p1}) AS slow, count() AS total FROM events WHERE event_date = '${p2}' GROUP BY event_type",1000,2026-06-03,,,
