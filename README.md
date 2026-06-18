@@ -213,14 +213,14 @@ each one is defined:
 | key            | meaning                                                       | default     | source |
 | -------------- | ------------------------------------------------------------- | ----------- | ------ |
 | `ch_host`      | ClickHouse host                                               | `localhost` | **.env** |
-| `ch_port`      | HTTP port                                                     | `8123`      | **.env** |
+| `ch_port`      | HTTP port                                                     | `8443`      | **.env** |
 | `ch_protocol`  | `http` or `https`                                             | `http`      | **.env** |
 | `ch_database`  | database name                                                 | `default`   | **.env** |
 | `ch_user`      | ClickHouse user                                               | `default`   | **.env** |
 | `ch_password`  | password (blank for no auth)                                  | ``          | **.env** |
-| `threads`      | simultaneous virtual users                                    | `40000`     | properties |
-| `ramp_up`      | seconds to reach `threads`                                    | `180`       | properties |
-| `duration`     | wall-clock seconds for the run                                | `600`       | properties |
+| `threads`      | simultaneous virtual users                                    | `800`     | properties |
+| `ramp_up`      | seconds to reach `threads`                                    | `10`       | properties |
+| `duration`     | wall-clock seconds for the run                                | `300`       | properties |
 | `loops`        | iterations per thread (`-1` = run until duration)             | `-1`        | properties |
 | `queries_csv`  | path to CSV (relative to `jmeter/`)                           | `../queries/queries.csv` | properties |
 | `jtl_path`     | output JTL path (run.sh overrides with timestamped name)      | `../results/results.jtl` | properties |
