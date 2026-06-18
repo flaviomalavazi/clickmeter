@@ -37,8 +37,13 @@ clickhouse-jmeter-benchmark/
 
 ## Quickstart
 
+> Benchmarking tables that already exist? Skip step 1 — see
+> [Benchmarking an existing database](#benchmarking-an-existing-database-the-common-case) below.
+
 ```bash
-# 1. Drop your DDL into schema/schema.sql (or keep the example for smoke testing).
+# 1. (Only if you need a fresh dataset) drop your DDL into schema/schema.sql, or
+#    keep the example for smoke testing, then seed it. Skip this against an
+#    existing database.
 cp schema/schema.sql.example schema/schema.sql
 scripts/load-schema.sh schema/schema.sql
 
@@ -62,6 +67,65 @@ scripts/run.sh threads=40000 ramp_up=180 duration=600
 - `results/jmeter-<timestamp>.log` — JMeter's own log
 
 `scripts/analyze-results.sh results/results-*.jtl` prints a one-screen summary.
+
+## Benchmarking an existing database (the common case)
+
+Most of the time you're pointing this harness at tables that **already exist** —
+a production-like dataset, a staging copy, or a database someone else loaded.
+In that case you **skip schema loading entirely**: there's no DDL to apply and
+nothing in `schema/` to touch. You only need to (1) tell the harness where the
+database lives and (2) write queries that match its real tables.
+
+```bash
+# 1. Point .env at the existing instance/database — no schema step.
+cp .env.example .env
+# edit ch_host / ch_port / ch_protocol / ch_user / ch_password, and set
+#   ch_database  to the database you already have (e.g. analytics, prod, ...)
+
+# 2. Write queries/queries.csv against your existing tables & columns.
+#    Reference real table and column names — see "How parameterized queries work".
+#    cp queries/queries.csv.example queries/queries.csv   # then edit
+
+# 3. (Optional but recommended) sanity-check connectivity + a real query first.
+scripts/run.sh threads=1 loops=1 duration=10
+
+# 4. Smoke test at low concurrency, then ramp.
+scripts/run.sh threads=50 duration=30
+scripts/run.sh threads=40000 ramp_up=180 duration=600
+```
+
+Notes when running against an existing schema:
+
+- **Don't run `load-schema.sh`.** It's only for seeding a fresh benchmark
+  database (see [below](#creating-a-fresh-benchmark-database-smoke-testing)).
+  The `schema/` directory and its example DDL are irrelevant here.
+- **`ch_database` must name the existing database.** Queries that omit a
+  database prefix resolve against `ch_database`; queries can also fully qualify
+  tables as `db.table` to hit a different one.
+- **Every column you reference must exist in the real schema.** A query hitting
+  an unknown identifier returns HTTP 404 (`UNKNOWN_IDENTIFIER`) and counts as a
+  failed sample, quietly inflating your error rate. Validate the queries
+  interactively before a high-concurrency run.
+- **You're hitting live data.** All queries are `SELECT`-style reads, but make
+  sure the user in `.env` has read-only access if you're pointing at anything
+  you can't afford to perturb.
+
+### Creating a fresh benchmark database (smoke testing)
+
+If you *don't* have a schema yet — or just want to validate the harness
+end-to-end before pointing it at real data — `schema/schema.sql.example` creates
+a self-contained `bench.events` table that matches `queries/queries.csv.example`:
+
+```bash
+# Apply the example DDL (seeds ~10M rows) to a throwaway benchmark database.
+cp schema/schema.sql.example schema/schema.sql      # or drop in your own DDL
+scripts/load-schema.sh schema/schema.sql
+
+# Then point queries/queries.csv at it and run as above.
+```
+
+`load-schema.sh` reads the same `.env`, so set `ch_database` to the database the
+DDL creates (`bench` in the example) before running it.
 
 ## Python harness (uv) — recommended
 
