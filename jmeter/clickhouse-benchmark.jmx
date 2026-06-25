@@ -170,7 +170,7 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPSampler.path">/?database=${CH_DATABASE}&amp;default_format=JSONCompact</stringProp>
+          <stringProp name="HTTPSampler.path">/?database=${CH_DATABASE}&amp;default_format=JSONCompact&amp;log_comment=${__P(ch_log_comment,clickmeter)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
           <boolProp name="HTTPSampler.auto_redirects">false</boolProp>

@@ -13,6 +13,10 @@ from .config import load_config, parse_overrides
 from . import analyze, runner
 
 
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _cmd_run(args):
     from .monitor import Monitor
     from .plot import make_report
@@ -20,6 +24,7 @@ def _cmd_run(args):
     overrides = parse_overrides(args.overrides)
     cfg = load_config(args.config, overrides)
     paths = runner.make_paths()
+    server_on = _truthy(cfg.get("server_monitor", "true"))
 
     threads = int(cfg.get("threads", "?")) if str(cfg.get("threads", "")).isdigit() else cfg.get("threads", "?")
     print("=" * 64)
@@ -28,7 +33,10 @@ def _cmd_run(args):
     print(f"  Threads:  {cfg.get('threads', '?')}   Ramp-up: {cfg.get('ramp_up', '?')}s   Duration: {cfg.get('duration', '?')}s")
     print(f"  Target:   {cfg.get('ch_protocol')}://{cfg.get('ch_host')}:{cfg.get('ch_port')}  db={cfg.get('ch_database')}")
     print(f"  JVM_ARGS: {runner.build_jvm_args(int(cfg.get('threads', 1000)))}")
+    cluster = (cfg.get("ch_cluster") or "").strip()
+    srv_scope = f"clusterAllReplicas('{cluster}')" if (server_on and cluster) else ("local node" if server_on else "off")
     print(f"  Monitor:  every {args.interval}s -> {paths['monitor']}")
+    print(f"  Server:   system tables ({srv_scope}) -> {paths['server']}")
     print("=" * 64)
 
     for warning in runner.preflight_warnings(cfg):
@@ -36,14 +44,30 @@ def _cmd_run(args):
 
     mon = Monitor(cfg, paths["monitor"], interval=args.interval)
     mon.start()
+    srv = None
+    if server_on:
+        from .server import ServerSampler
+        srv = ServerSampler(cfg, paths["server"], interval=args.interval)
+        srv.start()
     try:
         proc = runner.launch(cfg, paths)
         rc = proc.wait()
+        # Let the output-filter thread flush remaining JMeter lines before we
+        # print our own summary (no-op under BENCH_RAW_JMETER).
+        reader = getattr(proc, "bench_output_filter", None)
+        if reader is not None:
+            reader.join(timeout=5)
     finally:
         mon.stop()
         mon.join(timeout=args.interval + 5)
+        if srv is not None:
+            srv.stop()
+            srv.join(timeout=args.interval + 5)
     if mon.error:
-        print(f"  [monitor] server sampling degraded: {mon.error}", file=sys.stderr)
+        print(f"  [monitor] server RTT probe degraded: {mon.error}", file=sys.stderr)
+    if srv is not None and srv.error:
+        tag = "degraded" if srv.degraded else "note"
+        print(f"  [server] {tag}: {srv.error}", file=sys.stderr)
 
     print(f"\nJMeter exited with code {rc}. Analyzing {paths['jtl'].name} ...\n")
     if not paths["jtl"].exists():
@@ -55,12 +79,28 @@ def _cmd_run(args):
     summary = analyze.summarize(df)
     analyze.print_summary(summary)
 
-    verdict = make_report(paths["jtl"], paths["monitor"], paths["plot"], summary)
+    # Per-query attribution from system.query_log (tagged by this run's
+    # log_comment). Best-effort: skipped cleanly if query_log isn't readable.
+    if server_on:
+        from . import query_log
+        print()
+        qlog = query_log.fetch(
+            cfg, runner.run_log_comment(paths["stamp"]), out_csv=paths["query_log"]
+        )
+        query_log.print_report(qlog)
+
+    server_path = paths["server"] if server_on and paths["server"].exists() else None
+    verdict = make_report(paths["jtl"], paths["monitor"], paths["plot"], summary,
+                          server_path=server_path)
     print("\n" + "-" * 64)
     print(f"VERDICT: {verdict['label']}")
     print(f"  {verdict['reason']}")
     print("-" * 64)
     print(f"Plot:       {paths['plot']}")
+    if server_path:
+        print(f"Server CSV: {paths['server']}")
+        if paths['query_log'].exists():
+            print(f"query_log:  {paths['query_log']}")
     print(f"HTML report:{paths['report']}/index.html")
     return 0 if rc == 0 else rc
 
@@ -75,7 +115,7 @@ def _cmd_plot(args):
     from .plot import make_report
 
     out = args.out or str(Path(args.jtl).with_suffix("").as_posix() + "-verdict.png")
-    verdict = make_report(args.jtl, args.monitor, out)
+    verdict = make_report(args.jtl, args.monitor, out, server_path=args.server)
     print(f"VERDICT: {verdict['label']}")
     print(f"  {verdict['reason']}")
     print(f"Plot: {out}")
@@ -99,7 +139,8 @@ def main(argv=None):
 
     pp = sub.add_parser("plot", help="plot JTL + monitor CSV into a verdict figure")
     pp.add_argument("jtl")
-    pp.add_argument("monitor", nargs="?", default=None, help="monitor CSV (optional)")
+    pp.add_argument("monitor", nargs="?", default=None, help="client monitor CSV (optional)")
+    pp.add_argument("server", nargs="?", default=None, help="server system-tables CSV (optional)")
     pp.add_argument("-o", "--out", default=None, help="output PNG path")
     pp.set_defaults(func=_cmd_plot)
 
