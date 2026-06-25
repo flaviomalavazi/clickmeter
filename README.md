@@ -157,16 +157,96 @@ the JTL/HTML/log files, a `bench run` writes:
 - `results/monitor-<timestamp>.csv` — per-interval time series of JMeter CPU/RSS,
   TIME_WAIT/ESTABLISHED socket counts (this machine), and ClickHouse running-query
   count + round-trip latency (the server).
+- `results/server-<timestamp>.csv` — per-interval ClickHouse **system-table** time
+  series: running queries, background merges, tracked memory (`system.metrics`);
+  per-interval deltas of CPU/IO-wait/S3 microseconds, bytes scanned, cache hits,
+  memory-limit hits (`system.events`); and normalized host CPU / IO-wait / load
+  (`system.asynchronous_metrics`). See [Server-side visibility](#server-side-visibility-clickhouse-system-tables).
+- `results/query_log-<timestamp>.csv` — post-run per-query attribution from
+  `system.query_log`, one row per normalized query pattern.
 - `results/verdict-<timestamp>.png` — a four-panel figure (throughput, client-vs-server
-  latency, load-generator saturation, server concurrency) topped with a heuristic
-  verdict: *your machine*, *ClickHouse*, or *headroom/network-bound*.
+  latency, load-generator saturation, server concurrency) — **plus two more panels
+  (host CPU vs IO-wait, data-scanned/s + cache hit ratio) when server sampling is on** —
+  topped with a heuristic verdict: *your machine*, *ClickHouse (CPU / IO / S3 / memory /
+  concurrency)*, or *headroom/network-bound*.
 
 **How the verdict works.** The key signal is the latency panel: if client p50/p99 sit
 far above the server's `SELECT` round-trip, the time is being lost on your host or the
 network — not in ClickHouse. The verdict also flags JMeter CPU saturation (% of all
 cores), TIME_WAIT socket pressure, rising server RTT under load, and high error rates
-(503/429 → server limits; 403/401 → auth, not performance). It's a heuristic from a
-single run — confirm with a thread sweep (`10→50→100→500`) to find the knee.
+(503/429 → server limits; 403/401 → auth, not performance). **When server sampling is
+on, it adds ClickHouse-side rules** — CPU-bound, CPU-starved, disk/IO-bound,
+object-storage-bound (S3), and memory-pressure — derived from `system.events` and
+`system.asynchronous_metrics`, so a *ClickHouse* verdict comes with server-reported
+evidence rather than an inference from latency. It's a heuristic from a single run —
+confirm with a thread sweep (`10→50→100→500`) to find the knee.
+
+## Server-side visibility (ClickHouse system tables)
+
+The client-side monitor can only measure ClickHouse from the outside (round-trip
+latency, a running-query count). To see *why* the server is slow, the `bench`
+harness also reads ClickHouse's own [system
+tables](https://clickhouse.com/docs/operations/system-tables/) during and after
+each run. This is on by default (`server_monitor=true`); it degrades to the
+client-only behavior if the benchmark user can't read system tables.
+
+**During the run** (`server-<timestamp>.csv`, sampled every `--interval`):
+
+| table | what we pull | bottleneck it exposes |
+| ----- | ------------ | --------------------- |
+| `system.metrics` | `Query`, `Merge`, `BackgroundMergesAndMutationsPoolTask`, `TCPConnection`/`HTTPConnection`, `MemoryTracking` | concurrency ceiling, background-merge contention, connection/memory pressure |
+| `system.events` (per-interval deltas) | `OSCPUWaitMicroseconds`÷`OSCPUVirtualTimeMicroseconds`, `OSIOWaitMicroseconds`, `S3ReadMicroseconds`, `ContextLockWaitMicroseconds`, `SelectedBytes`, `MarkCacheHits`/`Misses`, `QueryMemoryLimitExceeded` | **CPU-bound / CPU-starved**, **disk-IO-bound**, **object-storage-bound (S3)**, lock contention, scan volume, cold cache, memory kills |
+| `system.asynchronous_metrics` | `OSUserTimeNormalized`, `OSIOWaitTimeNormalized`, `LoadAverage1`, `MemoryResident`, `MaxPartCountForPartition` | host CPU vs IO-wait (normalized per core), too-many-parts |
+
+**After the run** (`query_log-<timestamp>.csv`, per query pattern): every request
+is tagged with `log_comment=clickmeter-<timestamp>`, so the harness filters
+`system.query_log` to exactly this run and groups by `normalized_query_hash`. For
+each pattern you get server-side p50/p99 `query_duration_ms`, rows/bytes read,
+peak memory, error count, and a ProfileEvents breakdown that labels the limiter
+(`cpu` / `cpu-starved` / `io-wait` / `s3` / `lock`). Comparing server-side
+`query_duration_ms` against the client latency in the JTL is what cleanly
+separates "ClickHouse is slow" from "the time is lost in the network/client".
+
+### ClickHouse Cloud and clusters
+
+A Cloud service is multi-node behind one endpoint, so a single connection only
+samples whichever replica the load balancer picked. Set `ch_cluster=default`
+(the Cloud cluster name; it's the default in `benchmark.properties`) and the
+harness wraps every read in `clusterAllReplicas('default', system.*)` to
+aggregate across replicas — summing counters/gauges and averaging the normalized
+async metrics. For a **single self-managed node**, leave `ch_cluster` blank to
+read the plain `system.*` tables.
+
+For the post-run `query_log` pull specifically, the harness reads
+`clusterAllReplicas('default', merge(system, '^query_log'))`. The
+[`merge()`](https://clickhouse.com/docs/sql-reference/table-functions/merge)
+table function unions the current `query_log` with the rotated `query_log_<N>`
+tables ClickHouse leaves behind when the log schema changes across an upgrade —
+without it a run that straddled a rotation would lose rows. It walks a fallback
+chain so it always returns *something*:
+`clusterAllReplicas(cluster, merge(...))` → `merge(system, '^query_log')`
+(local node) → `system.query_log` (current table only), noting in the output
+whenever it had to drop down (missing cluster, missing grant, or a schema
+mismatch among very old rotated tables). The live `system.metrics`/`events`/
+`asynchronous_metrics` tables aren't `*_log` tables and never rotate, so they're
+read directly (cluster-wrapped only).
+
+### Permissions & caveats
+
+- The benchmark user needs `SELECT` on `system.metrics`, `system.events`,
+  `system.asynchronous_metrics`, and `system.query_log` (the Cloud `default`
+  user has these). A read-only/restricted user simply yields the client-only
+  verdict — nothing breaks.
+- `system.metrics`/`system.events` are **server-wide**: on a shared service the
+  deltas include other activity. The `log_comment`-scoped `query_log` is the
+  precise per-benchmark view; treat the live series as whole-server context.
+- The sampler's own queries are tagged `log_comment=clickmeter-monitor` and
+  excluded from the per-query report, and its one in-flight query is netted out
+  of the running-query count.
+- `system.query_log` flushes on an interval (~7.5s); the harness issues
+  `SYSTEM FLUSH LOGS` after the run if granted, so the final seconds are
+  captured.
+- Disable all of this with `server_monitor=false`.
 
 ## Honest caveats about 40k concurrent threads on one machine
 
@@ -224,6 +304,8 @@ each one is defined:
 | `loops`        | iterations per thread (`-1` = run until duration)             | `-1`        | properties |
 | `queries_csv`  | path to CSV (relative to `jmeter/`)                           | `../queries/queries.csv` | properties |
 | `jtl_path`     | output JTL path (run.sh overrides with timestamped name)      | `../results/results.jtl` | properties |
+| `server_monitor` | sample ClickHouse system tables + pull query_log (`bench` only) | `true`    | properties |
+| `ch_cluster`   | cluster for `clusterAllReplicas()` aggregation; blank = single node | `default` | properties |
 
 CLI override examples:
 
@@ -273,3 +355,4 @@ listeners as needed. Save back to the same path and re-run.
 | `Code: 202, DB::Exception: Too many simultaneous queries` | Raise `max_concurrent_queries` on ClickHouse.                                                   |
 | Throughput plateaus well below target                | JMeter driver is the bottleneck. Lower `threads`, increase `loops`, or go distributed.          |
 | HTML report not generated                            | The run died before completing. Check `results/jmeter-*.log`.                                   |
+| `WARNING: package sun.awt.X11 not in java.desktop` / `package scanning to locate plugins is deprecated` | Harmless JMeter/JDK startup noise; `bench` filters these from the console. Set `BENCH_RAW_JMETER=1` to see JMeter's unfiltered output. |

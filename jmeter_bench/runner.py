@@ -5,7 +5,9 @@ import atexit
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +17,39 @@ JMX = ROOT / "jmeter" / "clickhouse-benchmark.jmx"
 
 # Passed via a mode-600 -q file instead of -J, so they don't show up in `ps`.
 SECRET_KEYS = {"ch_password"}
+
+# Cosmetic JMeter/JDK startup noise we drop from the console (set
+# BENCH_RAW_JMETER=1 to see the unfiltered stream). Each entry is a substring;
+# a line is suppressed if it contains any of them. Kept tight and specific so
+# real warnings/errors and the throughput summariser always pass through:
+#   - the JDK warns about JMeter's unconditional --add-opens for sun.awt.X11,
+#     a package that only exists on Linux/X11 (harmless on macOS);
+#   - log4j2 warns that JMeter's bundled config uses deprecated plugin scanning.
+_NOISE = (
+    "package sun.awt.X11 not in java.desktop",
+    "The use of package scanning to locate plugins is deprecated",
+)
+
+
+def _filter_output(stream):
+    """Echo JMeter's combined stdout/stderr to ours, dropping _NOISE lines."""
+    try:
+        for line in iter(stream.readline, ""):
+            if not any(n in line for n in _NOISE):
+                sys.stdout.write(line)
+                sys.stdout.flush()
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def run_log_comment(stamp: str) -> str:
+    """The log_comment stamped on every request of a run, so query_log rows can
+    be matched back to it exactly. URL/SQL-safe by construction (stamp is
+    timestamp digits + dashes)."""
+    return f"clickmeter-{stamp}"
 
 
 def resolve_jmeter() -> str:
@@ -90,6 +125,8 @@ def make_paths(results_dir=None, stamp=None) -> dict:
         "log": results / f"jmeter-{stamp}.log",
         "report": results / f"report-{stamp}",
         "monitor": results / f"monitor-{stamp}.csv",
+        "server": results / f"server-{stamp}.csv",
+        "query_log": results / f"query_log-{stamp}.csv",
         "plot": results / f"verdict-{stamp}.png",
     }
 
@@ -102,6 +139,12 @@ def launch(cfg: dict, paths: dict) -> subprocess.Popen:
 
     jargs = [f"-J{k}={v}" for k, v in cfg.items() if k not in SECRET_KEYS]
     jargs.append(f"-Jjtl_path={paths['jtl']}")
+    # Tag every benchmark request so system.query_log can be filtered to exactly
+    # this run (see jmeter_bench.query_log). The sampler's HTTP path appends
+    # &log_comment=${__P(ch_log_comment,...)}; we set it to this run's stamp.
+    # The SQL still travels in the POST body. Honor an explicit override.
+    if "ch_log_comment" not in cfg:
+        jargs.append(f"-Jch_log_comment={run_log_comment(paths['stamp'])}")
 
     secret_args = _write_secret_props(cfg)
 
@@ -114,7 +157,20 @@ def launch(cfg: dict, paths: dict) -> subprocess.Popen:
         *secret_args,
         *jargs,
     ]
-    return subprocess.Popen(cmd, env=env)
+    if os.environ.get("BENCH_RAW_JMETER"):
+        return subprocess.Popen(cmd, env=env)
+    # Pipe and filter JMeter's console output. A daemon reader thread drains the
+    # pipe (so JMeter never blocks on a full buffer); the caller joins it via
+    # the `bench_output_filter` attribute after wait() so all lines flush before
+    # the harness prints its own summary.
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    reader = threading.Thread(target=_filter_output, args=(proc.stdout,), daemon=True)
+    reader.start()
+    proc.bench_output_filter = reader
+    return proc
 
 
 def _write_secret_props(cfg: dict) -> list:
